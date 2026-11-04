@@ -283,6 +283,7 @@ signal fa_disp2		: string(1 to 7);
 signal fa_disp3		: string(1 to 7);
 signal fa_disp4		: string(1 to 7);
 signal u4_pb_out		: std_logic_vector(7 downto 0);
+signal fa_sim_ret		: std_logic_vector(7 downto 0);	-- simulierte Schalter der gestrobten Spalte
 signal bm_display1	: string(1 to 7);
 signal bm_display2	: string(1 to 7);
 signal bm_display3	: string(1 to 7);
@@ -844,7 +845,7 @@ port map(
    din	 => cpu_dout,
 	dout	 => U4_IO_dout,
 		
-	pa_in	 => U4_pa_in or SW_Freeplay,
+	pa_in	 => U4_pa_in or SW_Freeplay or fa_sim_ret,
    pa_out => open,
    pb_in  => "00000000",
 	pb_out => u4_pb_out
@@ -1081,6 +1082,7 @@ gen_fa_control: if HAS_ESP32 generate
 	signal mon_sol_x  : std_logic_vector(8 downto 0) := (others => '0');
 	signal mon_snd    : std_logic_vector(4 downto 0);
 	signal mon_snd_x  : std_logic_vector(4 downto 0) := (others => '0');
+	signal fa_sim_sw  : std_logic_vector(FA_N_SW - 1 downto 0);
 
 	function dig2bcd(c : character) return std_logic_vector is
 	begin
@@ -1117,7 +1119,8 @@ generic map(
 	MAX_SW       => FA_N_SW,
 	MAX_DIGITS   => FA_DIGITS,
 	GAME_DIGITS  => 3,		-- FA-Control legt Namen/ROMs unter GottFA80/<nnn> ab
-	MON_BYTES    => FA_MON_BYTES
+	MON_BYTES    => FA_MON_BYTES,
+	HAS_SIM_SW   => true		-- Opcode 0x6F, Schalter simulieren im Monitor-Modus
 	)
 port map(
 	clk         => clk_50,
@@ -1140,8 +1143,29 @@ port map(
 	mon_data    => mon_data,
 	mon_rd      => mon_rd,
 	mon_idx     => mon_idx,
-	sim_sw      => open
+	sim_sw      => fa_sim_sw
 	);
+
+-- Simulierte Schalter (Opcode 0x6F, nur im Monitor-Modus, fa_control loescht sie
+-- unter Kontrolle und nach 2 s ohne Byte): Schalter 10*s + r liegt auf Return r,
+-- solange das Spiel Strobe s (U4 PB) treibt. Vor dem RIOT geodert - kann also nur
+-- schliessen, nie einen echten Schalter verdecken. Nicht waehrend das Spiel ueber
+-- Switch-Enable die DIPs liest (U5 PB7 = '1').
+SIM_RET_MUX: process(fa_sim_sw, U4_PB, U5_pb_out)
+	variable v : std_logic_vector(7 downto 0);
+begin
+	v := (others => '0');
+	if U5_pb_out(7) = '0' then
+		for s in 0 to 7 loop
+			if U4_PB(s) = '1' then
+				for r in 0 to 7 loop
+					v(r) := v(r) or fa_sim_sw(10 * s + r);
+				end loop;
+			end if;
+		end loop;
+	end if;
+	fa_sim_ret <= v;
+end process;
 
 -- Spielnummer wie auf der Bootanzeige (Spieler 2)
 game_bcd <= dig2bcd(game_dig2) & dig2bcd(game_dig1) & dig2bcd(game_dig0);
@@ -1256,7 +1280,7 @@ begin
 			for s in 0 to 7 loop
 				if U4_PB(s) = '1' then
 					for r in 0 to 7 loop
-						fa_sw_state(10 * s + r) <= U4_pa_in(r);
+						fa_sw_state(10 * s + r) <= U4_pa_in(r) or fa_sim_ret(r);	-- Monitor zeigt simulierte mit
 					end loop;
 				end if;
 			end loop;
@@ -1389,7 +1413,8 @@ begin
 end process;
 
 mon_data(7 downto 0)     <= x"00";		-- Byte 0 ist die Laenge, sendet fa_control
-mon_data(15 downto 8)    <= "000000" & fa_active & game_running;
+-- bit3: Schalter simulierbar (HAS_SIM_SW, Freigabe = ctrl_allow, hier immer '1')
+mon_data(15 downto 8)    <= "0000" & '1' & '0' & fa_active & game_running;
 mon_data(63 downto 16)   <= mon_lamps;
 mon_data(79 downto 64)   <= "0000000" & mon_sol;
 mon_data(95 downto 80)   <= "0000000" & mon_sol_x;
@@ -1417,6 +1442,7 @@ gen_no_fa_control: if not HAS_ESP32 generate
 	fa_u6a       <= (others => '1');
 	fa_u6b       <= (others => '0');
 	fa_sw_strobe <= (others => '0');
+	fa_sim_ret   <= (others => '0');
 	fa_disp1     <= "       ";
 	fa_disp2     <= "       ";
 	fa_disp3     <= "       ";
