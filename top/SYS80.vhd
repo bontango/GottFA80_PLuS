@@ -26,6 +26,11 @@
 -- lib_common\version_pkg.vhd. Anzeige = BOARD_ID & SW_SUB (z.B. "51" & '1').
 -- Debug ist jetzt 3 Bit breit (wie HW2.01); HW2.1x fuehrt nur Debug[0] heraus,
 -- Debug[1..2] sind dort VIRTUAL_PIN.
+--
+-- 04.11.2026 Variante plus_hw21x_cyclone_iv_v7 (Cyclone-IV-Board v7 mit ESP32-C3):
+-- FA-Control (lib_fa_control, aus SternFA) ueber HAS_ESP32, dafuer ohne integriertes
+-- Soundboard (HAS_SOUNDBOARD = false) - beides passt nicht zusammen in den EP4CE6.
+-- Ohne ESP ist fa_active konstant '0'; alle Muxe unten fallen dann weg.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -33,6 +38,7 @@ use ieee.std_logic_1164.all;
 use IEEE.numeric_std.all;
 use work.version_pkg.all;
 use work.variant_pkg.all;
+use work.fa_control_pkg.all;	-- fa_nibble_array_t, lib_fa_control/
 
 entity SYS80 is
 	port(
@@ -76,7 +82,13 @@ entity SYS80 is
 		Sound 			: 	buffer 	std_logic;
 
 		-- debug
-		Debug			:	out 	std_logic_vector(2 downto 0)
+		Debug			:	out 	std_logic_vector(2 downto 0);
+
+		-- FA-Control: ESP32-C3 auf X7 des Cyclone-IV-Boards v7 (HAS_ESP32).
+		-- Auf allen anderen Boards VIRTUAL_PIN (variant.psd1).
+		FA_RXD			:	in		std_logic;	-- R3, vom TX des ESP
+		FA_TXD			:	out	std_logic;	-- T2, zum RX des ESP
+		FA_CTRL_REQ		:	in		std_logic	-- N3, active low, Weak-Pull-up
 
 		);
 end SYS80;
@@ -233,6 +245,50 @@ signal soundrom2_addr	:  std_logic_vector(10 downto 0);
 signal wr_soundrom1		: std_logic;
 signal wr_soundrom2		: std_logic;
 
+------------------------------------------------------------------------------
+-- FA-Control (lib_fa_control). Nummerierung wie LISY80 (lisy80.c):
+--   Lampen 0..47  = Transistor Q1..Q48: Q = 4*(FEED-1) + LD-Bit, FEED 1..12 auf
+--                   U6 PB7..4, LD1..4 auf U6 PB3..0 (Q1 Game-Over-Relais, Q2 Tilt,
+--                   Q3 Muenzsperre, Sound16 = Q10 bei 80/80A, Q5 bei 80B).
+--   Spulen 1..9   = SOL1..9: zwei 74LS139 an U6 PA (AB1 = PA1..0, AB2 = PA3..2,
+--                   I1G = PA5, I2G = PA6, low aktiv; AB 3/2/1/0 = SOL1/2/3/4 bzw.
+--                   5/6/7/8) und SOL9 = PA7 (Spule an bei PA7 = '0').
+--                   Je Decoder kann nur EINE Spule gleichzeitig an sein.
+--   Schalter      = 10 * (U4 PB-Bit) + (U4 PA-Bit), 0..77, N_SW = 78 mit Luecken.
+--                   Test = 07, Replay/Credit = 47 wie in LISY80.
+--   Sound 0..15   = U6 PA3..0 negiert bei PA4 = '0' (Z31). Waehrend ein Sound
+--                   ansteht, sind die Spulendecoder abgeschaltet (gemeinsame Leitungen).
+--   Displays 1..4 = Spieler, 7 Stellen, ueber boot_message (nur 80/80A, BCD).
+--                   Display 0 (Status) wird angenommen, aber nicht angezeigt.
+-- fa_u6a/fa_u6b haben die Bedeutung der RIOT-Ports (vor den Invertern unten),
+-- damit die Ausgangspfade dieselben bleiben wie im Spiel.
+------------------------------------------------------------------------------
+constant FA_N_LAMPS	: integer := 48;
+constant FA_N_SOL		: integer := 9;
+constant FA_N_SW		: integer := 78;
+constant FA_N_DISP	: integer := 5;
+constant FA_DIGITS	: integer := 7;
+signal fa_active		: std_logic;
+signal fa_sw_state	: std_logic_vector(FA_N_SW - 1 downto 0) := (others => '0');
+signal fa_lamp_ovr	: std_logic_vector(FA_N_LAMPS - 1 downto 0);
+signal fa_sol_ovr		: std_logic_vector(FA_N_SOL - 1 downto 0);
+signal fa_disp_ovr	: fa_nibble_array_t(0 to FA_N_DISP * FA_DIGITS - 1);
+signal fa_snd_ovr		: std_logic_vector(3 downto 0);
+signal fa_snd_en		: std_logic;
+signal fa_u6a			: std_logic_vector(7 downto 0);
+signal fa_u6b			: std_logic_vector(7 downto 0);
+signal fa_sw_strobe	: std_logic_vector(7 downto 0);
+signal fa_disp1		: string(1 to 7);
+signal fa_disp2		: string(1 to 7);
+signal fa_disp3		: string(1 to 7);
+signal fa_disp4		: string(1 to 7);
+signal u4_pb_out		: std_logic_vector(7 downto 0);
+signal bm_display1	: string(1 to 7);
+signal bm_display2	: string(1 to 7);
+signal bm_display3	: string(1 to 7);
+signal bm_display4	: string(1 to 7);
+signal bm_error4		: string(1 to 7);
+
 
 begin
 
@@ -261,19 +317,25 @@ BM: entity work.boot_message
 port map(
 	clk_in		=> cpu_clk, 	
 	-- Control/Data Signals,
-   show  => not game_running,
+   show  => (not game_running) or fa_active,
 	SD_error => not SDcard_error,
 	-- output
 	bm_digit_strobe	=> bm_digit_strobe,
 	bm_segments => bm_segments,
-	-- input (display data)		
-	display1	=> "    " & BOARD_ID & SW_SUB,  -- SW VERSION: variant_pkg + version_pkg
-	display2	=> "    " & game_dig2 & game_dig1 & game_dig0,	
-	display3	=> " 050963",
-	display4	=> " " & g_opt_dig1 & g_opt_dig0 & "  " & sb_opt_dig1 & sb_opt_dig0,
-	error_disp4 => "0000000",
-	status_d	=> "       "	
+	-- input (display data); unter FA-Control die Ziffern des Hosts
+	display1	=> bm_display1,
+	display2	=> bm_display2,
+	display3	=> bm_display3,
+	display4	=> bm_display4,
+	error_disp4 => bm_error4,
+	status_d	=> "       "
 	);
+
+bm_display1 <= fa_disp1 when fa_active = '1' else "    " & BOARD_ID & SW_SUB;  -- SW VERSION: variant_pkg + version_pkg
+bm_display2 <= fa_disp2 when fa_active = '1' else "    " & game_dig2 & game_dig1 & game_dig0;
+bm_display3 <= fa_disp3 when fa_active = '1' else " 050963";
+bm_display4 <= fa_disp4 when fa_active = '1' else " " & g_opt_dig1 & g_opt_dig0 & "  " & sb_opt_dig1 & sb_opt_dig0;
+bm_error4   <= fa_disp4 when fa_active = '1' else "0000000";
 	
 ----------------------
 -- try anti thunk at boot
@@ -563,7 +625,7 @@ port map(
 -- U5
 -- display 
 --------------------------------------------------
-U5_PB_7 <= not U5_pb_out(7); --switch enable
+U5_PB_7 <= '1' when fa_active = '1' else not U5_pb_out(7); --switch enable (FA: Matrix, keine DIPs)
 
 -- determine if we have a 80B system -> no strobes on U5 PA0 .. PA3
 COUNT_STROBES: entity work.count_to_zero
@@ -611,14 +673,14 @@ port map(
 -- 80/80A display routines	
 --------------------------------------------------
 --digit strobes
-U5_PA(3 downto 0) <= U5_pa_out(3 downto 0) when game_running='1' else bm_digit_strobe;
+U5_PA(3 downto 0) <= U5_pa_out(3 downto 0) when game_running='1' and fa_active='0' else bm_digit_strobe;
 
 -- assign display segments dependent on display type		
 disp_segments <= 
 --	segments_80B when not80B = '0' else	
 --	bm_segments when game_running = '0' else --and U5_pb_out(6) = '1' else  --RTH
 --	segments_80;
-	bm_segments when ( game_running = '0' and U5_pb_out(6) = '1') or SDcard_error = '0' else  --RTH
+	bm_segments when ( game_running = '0' and U5_pb_out(6) = '1') or SDcard_error = '0' or fa_active = '1' else  --RTH
 	segments_80 when not80B = '1' else
    segments_80B;	
 
@@ -678,10 +740,15 @@ segments_80(24) <= not U5_pb_out(6);
 --------------------------------------------------
 -- solenoids & lamps
 --------------------------------------------------
-U6_PA(4 downto 0) <= not U6_pa_out(4 downto 0) when game_running='1' else "00000"; --sound AND Z31
-U6_PA(7 downto 5) <= U6_pa_out(7 downto 5) when game_running='1' else "111"; -- decoder enable and Sol9
-U6_PB(3 downto 0) <= not U6_pb_out(3 downto 0) when game_running='1' else "1111"; -- thunk prevention (inverter)
-U6_PB(7 downto 4) <= U6_pb_out(7 downto 4)when reset_l='1' else lamp_ds; -- thunk prevention 
+-- unter FA-Control dieselben Pfade, gespeist aus fa_u6a/fa_u6b (RIOT-Bedeutung)
+U6_PA(4 downto 0) <= not fa_u6a(4 downto 0) when fa_active='1' else
+                     not U6_pa_out(4 downto 0) when game_running='1' else "00000"; --sound AND Z31
+U6_PA(7 downto 5) <= fa_u6a(7 downto 5) when fa_active='1' else
+                     U6_pa_out(7 downto 5) when game_running='1' else "111"; -- decoder enable and Sol9
+U6_PB(3 downto 0) <= not fa_u6b(3 downto 0) when fa_active='1' else
+                     not U6_pb_out(3 downto 0) when game_running='1' else "1111"; -- thunk prevention (inverter)
+U6_PB(7 downto 4) <= fa_u6b(7 downto 4) when fa_active='1' else
+                     U6_pb_out(7 downto 4)when reset_l='1' else lamp_ds; -- thunk prevention
 	
 -- cpu clock 892Khz
 clock_gen: entity work.cpu_clk_gen 
@@ -694,7 +761,7 @@ port map(
 U1: entity work.T65 -- 6502 
 port map(
 	Mode    			=> "00",
-	Res_n   			=> reset_l,
+	Res_n   			=> reset_l and not fa_active,	-- FA-Control haelt die CPU an
 	Enable  			=> '1',
 	Clk     			=> cpu_clk,
 	Rdy     			=> '1',
@@ -780,8 +847,10 @@ port map(
 	pa_in	 => U4_pa_in or SW_Freeplay,
    pa_out => open,
    pb_in  => "00000000",
-	pb_out => U4_PB
+	pb_out => u4_pb_out
  );
+-- Schalter-Strobes: unter FA-Control aus FA_STROBES
+U4_PB <= fa_sw_strobe when fa_active = '1' else u4_pb_out;
 
 U5_RAM: entity work.RIOT_RAM
 port map(
@@ -916,6 +985,19 @@ port map(
 );
 
 
+------------------------------------------------------------------------------
+-- Integriertes Soundboard (GOSOF80). Auf dem v7-Board (FA-Control) abgeschaltet:
+-- beides zusammen passt nicht in den EP4CE6. Die Sound-Leitungen U6 PA0..4 gehen
+-- trotzdem an den Stecker - ein vorhandenes Original-Soundboard bekommt sie.
+------------------------------------------------------------------------------
+gen_no_soundboard: if not HAS_SOUNDBOARD generate
+	Sound          <= '0';
+	Audio_RX       <= '1';				-- UART-Ruhepegel zum DFPlayer
+	soundrom1_addr <= (others => '0');
+	soundrom2_addr <= (others => '0');
+end generate;
+
+gen_soundboard: if HAS_SOUNDBOARD generate
 SOUNDBOARD: entity work.gosof80
 port map(
 		clk_50	=> clk_50,
@@ -948,9 +1030,221 @@ port map(
 		soundrom2_addr => soundrom2_addr,
 		soundrom1_dout => soundrom1_dout,
 		soundrom2_dout => soundrom2_dout
-		
-	); 	
-	
-	
+
+	);
+end generate;
+
+------------------------------------------------------------------------------
+-- FA-Control. Die Muxe oben sind bewusst unbedingt: ohne ESP ist fa_active die
+-- Konstante '0', und die Synthese entfernt sie wieder.
+------------------------------------------------------------------------------
+gen_fa_control: if HAS_ESP32 generate
+
+	signal lamp_cnt   : integer range 0 to 4999 := 0;	-- 100 us je Phase
+	signal lamp_phase : integer range 0 to 2 := 0;
+	signal lamp_latch : integer range 1 to 12 := 1;
+	signal sw_cnt     : integer range 0 to 49999 := 0;	-- 1 ms je Strobe
+	signal sw_slot    : integer range 0 to 7 := 0;
+	signal game_bcd   : std_logic_vector(11 downto 0);
+
+	function dig2bcd(c : character) return std_logic_vector is
+	begin
+		if c >= '0' and c <= '9' then
+			return std_logic_vector(to_unsigned(character'pos(c) - 48, 4));
+		end if;
+		return "0000";
+	end function;
+
+	function nib2char(n : std_logic_vector(3 downto 0)) return character is
+	begin
+		if unsigned(n) < 10 then
+			return character'val(48 + to_integer(unsigned(n)));
+		end if;
+		return ' ';		-- >= 0xA = dunkel
+	end function;
+
+begin
+
+FAC: entity work.fa_control
+generic map(
+	CLKS_PER_BIT => 434,		-- 50 MHz / 115200 Baud
+	HW_NAME      => "GottFA80",
+	API_VER      => "0.12",
+	N_LAMPS      => FA_N_LAMPS,
+	N_SOL        => FA_N_SOL,
+	N_SOUNDS     => 16,
+	N_SW         => FA_N_SW,
+	N_DISP       => FA_N_DISP,
+	DISP_TYPE    => 1,		-- BCD7
+	DISP_DIGITS  => (4, 7, 7, 7, 7, 0, 0),
+	MAX_LAMPS    => FA_N_LAMPS,
+	MAX_SOL      => FA_N_SOL,
+	MAX_SW       => FA_N_SW,
+	MAX_DIGITS   => FA_DIGITS,
+	GAME_DIGITS  => 3,		-- FA-Control legt Namen/ROMs unter GottFA80/<nnn> ab
+	MON_BYTES    => 0		-- kein Monitor (Platz), s. VARIANTEN.md
+	)
+port map(
+	clk         => clk_50,
+	reset       => not reset_sw_stable,
+	rxd         => FA_RXD,
+	txd         => FA_TXD,
+	ctrl_req    => FA_CTRL_REQ,
+	ctrl_allow  => '1',		-- wie GottFA1 v7: Freigabe allein ueber ctrl_req
+	ctrl_active => fa_active,
+	ver_main    => dig2bcd(BOARD_ID(1)),
+	ver_sub1    => dig2bcd(BOARD_ID(2)),
+	ver_sub2    => dig2bcd(SW_SUB),
+	game_info   => game_bcd,
+	sw_state    => fa_sw_state,
+	lamp_ovr    => fa_lamp_ovr,
+	sol_ovr     => fa_sol_ovr,
+	disp_ovr    => fa_disp_ovr,
+	snd_ovr     => fa_snd_ovr,
+	snd_en      => fa_snd_en,
+	mon_rd      => open,
+	mon_idx     => open,
+	sim_sw      => open
+	);
+
+-- Spielnummer wie auf der Bootanzeige (Spieler 2)
+game_bcd <= dig2bcd(game_dig2) & dig2bcd(game_dig1) & dig2bcd(game_dig0);
+
+-- Displays: LISY-Ziffer 0 ist die LINKE, boot_message zeigt display(1) links.
+fa_disp1 <= nib2char(fa_disp_ovr(1*FA_DIGITS+0)) & nib2char(fa_disp_ovr(1*FA_DIGITS+1)) & nib2char(fa_disp_ovr(1*FA_DIGITS+2)) &
+            nib2char(fa_disp_ovr(1*FA_DIGITS+3)) & nib2char(fa_disp_ovr(1*FA_DIGITS+4)) & nib2char(fa_disp_ovr(1*FA_DIGITS+5)) &
+            nib2char(fa_disp_ovr(1*FA_DIGITS+6));
+fa_disp2 <= nib2char(fa_disp_ovr(2*FA_DIGITS+0)) & nib2char(fa_disp_ovr(2*FA_DIGITS+1)) & nib2char(fa_disp_ovr(2*FA_DIGITS+2)) &
+            nib2char(fa_disp_ovr(2*FA_DIGITS+3)) & nib2char(fa_disp_ovr(2*FA_DIGITS+4)) & nib2char(fa_disp_ovr(2*FA_DIGITS+5)) &
+            nib2char(fa_disp_ovr(2*FA_DIGITS+6));
+fa_disp3 <= nib2char(fa_disp_ovr(3*FA_DIGITS+0)) & nib2char(fa_disp_ovr(3*FA_DIGITS+1)) & nib2char(fa_disp_ovr(3*FA_DIGITS+2)) &
+            nib2char(fa_disp_ovr(3*FA_DIGITS+3)) & nib2char(fa_disp_ovr(3*FA_DIGITS+4)) & nib2char(fa_disp_ovr(3*FA_DIGITS+5)) &
+            nib2char(fa_disp_ovr(3*FA_DIGITS+6));
+fa_disp4 <= nib2char(fa_disp_ovr(4*FA_DIGITS+0)) & nib2char(fa_disp_ovr(4*FA_DIGITS+1)) & nib2char(fa_disp_ovr(4*FA_DIGITS+2)) &
+            nib2char(fa_disp_ovr(4*FA_DIGITS+3)) & nib2char(fa_disp_ovr(4*FA_DIGITS+4)) & nib2char(fa_disp_ovr(4*FA_DIGITS+5)) &
+            nib2char(fa_disp_ovr(4*FA_DIGITS+6));
+
+-- Lampen: je 74175 (FEED 1..12) erst LD mit FEED 0, dann FEED = n, dann wieder
+-- FEED 0, LD bleibt stehen - so passt es zu jeder Taktflanke. RIOT-Bedeutung:
+-- LD = '1' ist "an" (lisy80_coil_handler_b), invertiert wird beim Ausgang oben.
+FA_LAMPS: process(clk_50)
+	variable nib : std_logic_vector(3 downto 0);
+begin
+	if rising_edge(clk_50) then
+		nib := (others => '0');
+		for i in 0 to 11 loop
+			if lamp_latch = i + 1 then
+				nib := fa_lamp_ovr(4 * i + 3 downto 4 * i);
+			end if;
+		end loop;
+		if lamp_cnt = 4999 then
+			lamp_cnt <= 0;
+			if lamp_phase = 2 then
+				lamp_phase <= 0;
+				if lamp_latch = 12 then
+					lamp_latch <= 1;
+				else
+					lamp_latch <= lamp_latch + 1;
+				end if;
+			else
+				lamp_phase <= lamp_phase + 1;
+			end if;
+		else
+			lamp_cnt <= lamp_cnt + 1;
+		end if;
+		case lamp_phase is
+			when 0 =>      fa_u6b <= "0000" & nib;
+			when 1 =>      fa_u6b(7 downto 4) <= std_logic_vector(to_unsigned(lamp_latch, 4));
+			when others => fa_u6b(7 downto 4) <= "0000";
+		end case;
+	end if;
+end process;
+
+-- Spulen und Sound auf U6 PA (RIOT-Bedeutung, s. Konstantenblock).
+FA_SOL: process(fa_sol_ovr, fa_snd_ovr, fa_snd_en)
+	variable a : std_logic_vector(7 downto 0);
+begin
+	a := "01111111";			-- Decoder aus, Sound aus, AB = 11
+	a(7) := not fa_sol_ovr(8);		-- SOL9: an bei PA7 = '0'
+	if fa_snd_en = '1' then
+		a(3 downto 0) := not fa_snd_ovr;	-- Z31 freigegeben, Sound negiert
+		a(4) := '0';
+	else
+		-- Decoder 1: SOL1..4 (AB1 = 3..0), kleinste Nummer gewinnt
+		if    fa_sol_ovr(0) = '1' then a(1 downto 0) := "11"; a(5) := '0';
+		elsif fa_sol_ovr(1) = '1' then a(1 downto 0) := "10"; a(5) := '0';
+		elsif fa_sol_ovr(2) = '1' then a(1 downto 0) := "01"; a(5) := '0';
+		elsif fa_sol_ovr(3) = '1' then a(1 downto 0) := "00"; a(5) := '0';
+		end if;
+		-- Decoder 2: SOL5..8 (AB2 = 3..0)
+		if    fa_sol_ovr(4) = '1' then a(3 downto 2) := "11"; a(6) := '0';
+		elsif fa_sol_ovr(5) = '1' then a(3 downto 2) := "10"; a(6) := '0';
+		elsif fa_sol_ovr(6) = '1' then a(3 downto 2) := "01"; a(6) := '0';
+		elsif fa_sol_ovr(7) = '1' then a(3 downto 2) := "00"; a(6) := '0';
+		end if;
+	end if;
+	fa_u6a <= a;
+end process;
+
+-- Schalter-Strobes bei angehaltener CPU: ein Strobe je Millisekunde.
+FA_STROBES: process(clk_50)
+begin
+	if rising_edge(clk_50) then
+		if sw_cnt = 49999 then
+			sw_cnt <= 0;
+			if sw_slot = 7 then
+				sw_slot <= 0;
+			else
+				sw_slot <= sw_slot + 1;
+			end if;
+		else
+			sw_cnt <= sw_cnt + 1;
+		end if;
+		for s in 0 to 7 loop
+			if sw_slot = s then
+				fa_sw_strobe(s) <= '1';
+			else
+				fa_sw_strobe(s) <= '0';
+			end if;
+		end loop;
+	end if;
+end process;
+
+-- Schalterzustand, immer gelesen (FA-Control zeigt ihn auch ohne Uebernahme):
+-- wer auch strobt, die Returns eines aktiven Strobes werden uebernommen. Nicht,
+-- solange das Spiel ueber Switch-Enable die DIPs liest (U5 PB7 = '1').
+FA_SWITCHES: process(clk_50)
+begin
+	if rising_edge(clk_50) then
+		if U5_pb_out(7) = '0' or fa_active = '1' then
+			for s in 0 to 7 loop
+				if U4_PB(s) = '1' then
+					for r in 0 to 7 loop
+						fa_sw_state(10 * s + r) <= U4_pa_in(r);
+					end loop;
+				end if;
+			end loop;
+		end if;
+	end if;
+end process;
+
+end generate;
+
+------------------------------------------------------------------------------
+-- Boards ohne ESP32. FA_TXD hat hier keinen Pin (VIRTUAL_PIN), muss aber
+-- getrieben sein; '1' ist der Ruhepegel einer UART-Leitung.
+------------------------------------------------------------------------------
+gen_no_fa_control: if not HAS_ESP32 generate
+	fa_active    <= '0';
+	FA_TXD       <= '1';
+	fa_u6a       <= (others => '1');
+	fa_u6b       <= (others => '0');
+	fa_sw_strobe <= (others => '0');
+	fa_disp1     <= "       ";
+	fa_disp2     <= "       ";
+	fa_disp3     <= "       ";
+	fa_disp4     <= "       ";
+end generate;
+
 end rtl;
 		

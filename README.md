@@ -12,9 +12,15 @@ Hardware and background: <https://lisy.dev/> · releases: <https://lisy.dev/swre
 | `plus_hw201_cyclone_iv` | GottFA80 PLuS HW 2.01, Cyclone IV | `EP4CE6E22C8` | `50x` | `GottFA80_PLuS_v501.jic` |
 | `plus_hw21x_cyclone_iv` | GottFA80 PLuS HW 2.1x, Cyclone IV | `EP4CE6E22C8` | `51x` | `GottFA80_PLuS_v511.jic` |
 | `plus_hw21x_cyclone_10` | GottFA80 PLuS HW 2.1x, Cyclone 10 | `10CL006YE144C8G` | `61x` | `GottFA80_PLuS_v611.jic` |
+| `plus_hw21x_cyclone_iv_v7` | GottFA80 PLuS HW 2.1x, Cyclone IV board v7 (ESP32-C3) | `EP4CE6F17C8` | `71x` | – (`.rbf`, untested) |
 
-All three share **one** top level (`top/SYS80.vhd`) and one source tree. What differs per
-board are the pin locations (`variants/<name>/pins.tcl`), the device and one constant.
+All boards share **one** top level (`top/SYS80.vhd`) and one source tree. What differs per
+board are the pin locations (`variants/<name>/pins.tcl`), the device and a few constants.
+
+`plus_hw21x_cyclone_iv_v7` carries **FA-Control** (`lib_fa_control/`, a LISY API slave for
+the ESP32-C3 web interface) and therefore has **no integrated sound board** – both do not
+fit into the EP4CE6 together. Board v7 has no JTAG header; it is programmed through the
+ESP32, the release artifact is the `.rbf`.
 
 The version shown at boot is `BOARD_ID & SW_SUB`: the two leading digits identify the
 board (`variants/<name>/variant_pkg.vhd`; first digit FPGA family, second digit board
@@ -28,6 +34,7 @@ top/SYS80.vhd          the one top level
 lib_common/            all shared modules, version_pkg.vhd, SYS80.sdc
 lib_cyclone_IV/        megafunctions for Cyclone IV E   (identical entity names)
 lib_cyclone_10/        megafunctions for Cyclone 10 LP  (identical entity names)
+lib_fa_control/        FA-Control (LISY API slave), built only where HAS_ESP32
 variants/<name>/       variant_pkg.vhd, variant.psd1, device.tcl, pins.tcl,
                        SYS80.qpf, SYS80.cof, SYS80.qsf (GENERATED)
 scripts/               gen_qsf.ps1  check.ps1  build.ps1  release.ps1  baseline.csv

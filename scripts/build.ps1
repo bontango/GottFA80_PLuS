@@ -40,6 +40,16 @@ try {
     if (-not (Test-Path $sof)) { throw "keine .sof erzeugt: $sof" }
     "  {0}  {1:N0} Byte" -f (Split-Path $sof -Leaf), (Get-Item $sof).Length
 
+    # Board v7 (kein JTAG): Release ist die .rbf, die der Assembler ueber
+    # GENERATE_RBF_FILE (device.tcl) selbst schreibt. Pruefen, dass sie aus DIESEM
+    # Compile stammt - eine alte .rbf neben einer neuen .sof waere ein falsches Release.
+    if ($meta.ReleaseArtifact -eq 'rbf') {
+        $rbf = Join-Path $VarDir "output_files\$Project.rbf"
+        if (-not (Test-Path $rbf)) { throw "keine .rbf erzeugt: $rbf (GENERATE_RBF_FILE in device.tcl?)" }
+        if ((Get-Item $rbf).LastWriteTime -lt (Get-Item $sof).LastWriteTime.AddSeconds(-60)) { throw ".rbf ist aelter als die .sof: $rbf" }
+        "  {0}  {1:N0} Byte" -f (Split-Path $rbf -Leaf), (Get-Item $rbf).Length
+    }
+
     if (-not $NoJic -and $meta.ReleaseArtifact -eq 'jic') {
         & "$QuartusBin\quartus_cpf.exe" -c "$Project.cof"
         if ($LASTEXITCODE -ne 0) { throw "quartus_cpf ist fehlgeschlagen ($LASTEXITCODE)" }

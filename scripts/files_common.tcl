@@ -34,5 +34,12 @@ set_global_assignment -name VHDL_FILE ../../lib_common/cpu_clk_gen.vhd
 set_global_assignment -name VHDL_FILE ../../lib_common/count_to_zero.vhd
 set_global_assignment -name VHDL_FILE ../../lib_common/byte_to_ascii.vhd
 set_global_assignment -name VHDL_FILE ../../lib_common/boot_message.vhd
+# FA-Control (lib_fa_control, Kopie aus SternFA rtl/fa_control). In JEDER Variante
+# gelistet, gebaut nur mit HAS_ESP32: Quartus loest Entities auch im nicht genommenen
+# generate-Zweig auf (Error 10481).
+set_global_assignment -name VHDL_FILE ../../lib_fa_control/fa_control_pkg.vhd
+set_global_assignment -name VHDL_FILE ../../lib_fa_control/uart_rx.vhd
+set_global_assignment -name VHDL_FILE ../../lib_fa_control/uart_tx.vhd
+set_global_assignment -name VHDL_FILE ../../lib_fa_control/fa_control.vhd
 set_global_assignment -name VHDL_FILE ../../top/SYS80.vhd
 set_global_assignment -name SDC_FILE ../../lib_common/SYS80.sdc

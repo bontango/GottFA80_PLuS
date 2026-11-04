@@ -10,6 +10,7 @@
 !/lib_common/
 !/lib_cyclone_10/
 !/lib_cyclone_IV/
+!/lib_fa_control/
 !/README.md
 !/WORKFLOW.md
 !/.gitignore

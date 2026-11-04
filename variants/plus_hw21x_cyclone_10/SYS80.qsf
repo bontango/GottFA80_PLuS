@@ -45,6 +45,9 @@ set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_
 # --- optionale Top-Level-Ports, die dieses Board nicht hat ---
 set_instance_assignment -name VIRTUAL_PIN ON -to Debug[1]
 set_instance_assignment -name VIRTUAL_PIN ON -to Debug[2]
+set_instance_assignment -name VIRTUAL_PIN ON -to FA_RXD
+set_instance_assignment -name VIRTUAL_PIN ON -to FA_TXD
+set_instance_assignment -name VIRTUAL_PIN ON -to FA_CTRL_REQ
 
 # --- pins ---
 set_location_assignment PIN_23 -to clk_50
@@ -162,6 +165,10 @@ set_global_assignment -name VHDL_FILE ../../lib_common/cpu_clk_gen.vhd
 set_global_assignment -name VHDL_FILE ../../lib_common/count_to_zero.vhd
 set_global_assignment -name VHDL_FILE ../../lib_common/byte_to_ascii.vhd
 set_global_assignment -name VHDL_FILE ../../lib_common/boot_message.vhd
+set_global_assignment -name VHDL_FILE ../../lib_fa_control/fa_control_pkg.vhd
+set_global_assignment -name VHDL_FILE ../../lib_fa_control/uart_rx.vhd
+set_global_assignment -name VHDL_FILE ../../lib_fa_control/uart_tx.vhd
+set_global_assignment -name VHDL_FILE ../../lib_fa_control/fa_control.vhd
 set_global_assignment -name VHDL_FILE ../../top/SYS80.vhd
 set_global_assignment -name SDC_FILE ../../lib_common/SYS80.sdc
 set_global_assignment -name QIP_FILE ../../lib_cyclone_10/SYSTEM_ROM.qip
