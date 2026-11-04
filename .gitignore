@@ -1,12 +1,57 @@
-# Ignore everything at root level
+# Whitelist: im Wurzelordner liegen auch die noch nicht umgebauten GottFA80-/GottFA80S-
+# Projektordner und die alten PLuS-Ordner (Backup bis 04.11.2026, nicht mehr benutzen).
+# Ins Repo gehoert nur der gemeinsame Sourcebaum.
 /*
 
-# Except the project directories
-!GottFA80_PLuS_HW21x_Cyclone_10/
-!GottFA80_PLuS_HW21x_Cyclone_IV_v4/
-!lib_common/
-!lib_cyclone_10/
-!lib_cyclone_IV/
+!/top/
+!/variants/
+!/scripts/
+!/docs/
+!/lib_common/
+!/lib_cyclone_10/
+!/lib_cyclone_IV/
+!/README.md
+!/WORKFLOW.md
+!/.gitignore
+!/.gitattributes
 
-# And not the .gitignore itself
-!.gitignore
+# Interne Arbeitsnotizen (liegen im Wurzelordner, bleiben lokal)
+#   CLAUDE.md  VARIANTEN.md  PLAN_Zielstruktur.md
+
+# Quartus-Buildartefakte - liegen INNERHALB von variants/<name>/, weil das dort das
+# Quartus-Projektverzeichnis ist.
+db/
+incremental_db/
+output_files/
+atom_netlists/
+simulation/
+greybox_tmp/
+
+# Backups und Workspaces
+*.bak
+*.qws
+*.orig
+* - Kopie.*
+
+# Reports und Zwischenstaende
+*.rpt
+*.summary
+*.smsg
+*.pin
+*.jdi
+*.sld
+*.done
+*.qdf
+*.map
+*.cdf
+c5_pin_model_dump.txt
+PLLJ_PLLSPE_INFO.txt
+*.log
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# HINWEIS: die .cmp/.ppf der Megafunctions sind ABSICHTLICH getrackt - die .qip
+# listen sie als MISC_FILE.
+# HINWEIS: bin/ (Releases) liegt nicht im Repo, nur auf dem Netzlaufwerk und lisy.dev.

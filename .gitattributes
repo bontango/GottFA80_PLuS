@@ -1,0 +1,14 @@
+# Zeilenenden: git normalisiert beim Einchecken auf LF und checkt mit der
+# Plattformkonvention aus - im Arbeitsverzeichnis bleibt CRLF, wie Quartus und die
+# Windows-Editoren es erwarten. (Der Index war schon vorher LF, ueber core.autocrlf;
+# das hier macht es unabhaengig von der lokalen git-Konfiguration.)
+* text=auto
+
+*.sof binary
+*.jic binary
+*.pof binary
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary
+*.img binary
