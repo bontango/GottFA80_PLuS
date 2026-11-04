@@ -1047,6 +1047,41 @@ gen_fa_control: if HAS_ESP32 generate
 	signal sw_slot    : integer range 0 to 7 := 0;
 	signal game_bcd   : std_logic_vector(11 downto 0);
 
+	-- Monitor (Opcode 0x6E, FA-Control ab 1.25), Byte k der Antwort =
+	-- mon_data(8k+7 downto 8k). Laenge folgt aus der Bestueckung
+	-- (fa_connect_monitor_len): 1 + 6 + 2*2 + 1 + 10 + (2 + 4*4) = 40.
+	--   1      Flags: bit0 Spiel laeuft, bit1 FA-Control aktiv (Attract/Sim: 0)
+	--   2..7   Lampen 0..47 (Q1..Q48), LSB von Byte 2 = Lampe 0
+	--   8..9   Spulen 1..9 jetzt (bit0 = Spule 1)
+	--   10..11 Spulen gesehen seit dem letzten Abholen
+	--   12     Sound gesehen seit dem letzten Abholen: bit0..3 = S1/S2/S4/S8, bit4 = S16
+	--   13..22 Schalter wie Opcode 0x28 (10 * PB + PA)
+	--   23..40 Displays 0..4 (Status 4, Spieler je 7 Stellen + 1 dunkles Fuellnibble),
+	--          zwei Ziffern je Byte, linke Ziffer im High-Nibble, >= 0xA = dunkel
+	constant FA_MON_BYTES : integer := 40;
+	type mon_seq_t is array (0 to 35) of integer range -1 to 31;
+	-- Ziffer n der Displayfolge -> Index in mon_dig (-1 = Fuellnibble)
+	constant MON_SEQ : mon_seq_t := (
+		0, 1, 2, 3,                          -- Status
+		4, 5, 6, 7, 8, 9, 10, -1,            -- Spieler 1
+		11, 12, 13, 14, 15, 16, 17, -1,      -- Spieler 2
+		18, 19, 20, 21, 22, 23, 24, -1,      -- Spieler 3
+		25, 26, 27, 28, 29, 30, 31, -1);     -- Spieler 4
+	signal mon_data   : std_logic_vector(8 * FA_MON_BYTES + 7 downto 0);
+	signal mon_rd     : std_logic;
+	signal mon_idx    : integer range 0 to 255;
+	signal mon_dig    : fa_nibble_array_t(0 to 31) := (others => "1111");
+	signal mon_lamps  : std_logic_vector(47 downto 0) := (others => '0');
+	signal mon_b_q    : std_logic_vector(7 downto 0) := (others => '0');
+	signal mon_b_qq   : std_logic_vector(7 downto 0) := (others => '0');
+	signal mon_s_q    : std_logic_vector(3 downto 0) := (others => '0');
+	signal mon_s_qq   : std_logic_vector(3 downto 0) := (others => '0');
+	signal mon_eff_a  : std_logic_vector(7 downto 0);
+	signal mon_sol    : std_logic_vector(8 downto 0);
+	signal mon_sol_x  : std_logic_vector(8 downto 0) := (others => '0');
+	signal mon_snd    : std_logic_vector(4 downto 0);
+	signal mon_snd_x  : std_logic_vector(4 downto 0) := (others => '0');
+
 	function dig2bcd(c : character) return std_logic_vector is
 	begin
 		if c >= '0' and c <= '9' then
@@ -1082,7 +1117,7 @@ generic map(
 	MAX_SW       => FA_N_SW,
 	MAX_DIGITS   => FA_DIGITS,
 	GAME_DIGITS  => 3,		-- FA-Control legt Namen/ROMs unter GottFA80/<nnn> ab
-	MON_BYTES    => 0		-- kein Monitor (Platz), s. VARIANTEN.md
+	MON_BYTES    => FA_MON_BYTES
 	)
 port map(
 	clk         => clk_50,
@@ -1102,8 +1137,9 @@ port map(
 	disp_ovr    => fa_disp_ovr,
 	snd_ovr     => fa_snd_ovr,
 	snd_en      => fa_snd_en,
-	mon_rd      => open,
-	mon_idx     => open,
+	mon_data    => mon_data,
+	mon_rd      => mon_rd,
+	mon_idx     => mon_idx,
 	sim_sw      => open
 	);
 
@@ -1227,6 +1263,147 @@ begin
 		end if;
 	end if;
 end process;
+
+------------------------------------------------------------------------------
+-- Monitor: der Istzustand, gelesen ohne Uebernahme und ohne etwas anzufassen.
+-- Quelle sind die RIOT-Werte (bzw. unter FA-Control fa_u6a/fa_u6b), also dieselben
+-- Werte, die LISY80 auswertet. RIOT-Ausgaenge wechseln mit cpu_clk; sie werden
+-- zweimal abgetastet und muessen uebereinstimmen.
+------------------------------------------------------------------------------
+-- Lampen: Schatten der 74175. Solange FEED = n (1..12) steht, wird LD uebernommen.
+MON_LAMP_SHADOW: process(clk_50)
+	variable feed : integer range 0 to 15;
+begin
+	if rising_edge(clk_50) then
+		if fa_active = '1' then
+			mon_b_q <= fa_u6b;
+		else
+			mon_b_q <= U6_pb_out;
+		end if;
+		mon_b_qq <= mon_b_q;
+		if mon_b_q = mon_b_qq and (game_running = '1' or fa_active = '1') then
+			feed := to_integer(unsigned(mon_b_q(7 downto 4)));
+			for i in 0 to 11 loop
+				if feed = i + 1 then
+					mon_lamps(4 * i + 3 downto 4 * i) <= mon_b_q(3 downto 0);
+				end if;
+			end loop;
+		end if;
+	end if;
+end process;
+
+-- Spulen und Sound aus U6 PA wie lisy80_coil_handler_a.
+mon_eff_a <= fa_u6a when fa_active = '1' else U6_pa_out;
+
+MON_COILS: process(mon_eff_a, game_running, fa_active)
+	variable s : std_logic_vector(8 downto 0);
+begin
+	s := (others => '0');
+	if game_running = '1' or fa_active = '1' then
+		if mon_eff_a(5) = '0' then		-- I1G: Decoder 1 (SOL1..4)
+			case mon_eff_a(1 downto 0) is
+				when "11"   => s(0) := '1';
+				when "10"   => s(1) := '1';
+				when "01"   => s(2) := '1';
+				when others => s(3) := '1';
+			end case;
+		end if;
+		if mon_eff_a(6) = '0' then		-- I2G: Decoder 2 (SOL5..8)
+			case mon_eff_a(3 downto 2) is
+				when "11"   => s(4) := '1';
+				when "10"   => s(5) := '1';
+				when "01"   => s(6) := '1';
+				when others => s(7) := '1';
+			end case;
+		end if;
+		s(8) := not mon_eff_a(7);		-- SOL9 hat einen Inverter dahinter
+	end if;
+	mon_sol <= s;
+end process;
+
+-- Sound S1..S8 = PA3..0 negiert bei PA4 = '0'; S16 = Lampe Q10 (80/80A) bzw. Q5 (80B).
+mon_snd(3 downto 0) <= not mon_eff_a(3 downto 0)
+                       when mon_eff_a(4) = '0' and (game_running = '1' or fa_active = '1')
+                       else "0000";
+mon_snd(4) <= mon_lamps(9) when not80B = '1' else mon_lamps(4);
+
+-- Spulen und Sound dauern Millisekunden, der Host fragt alle 500 ms: jeden Puls
+-- halten, bis sein Byte gesendet ist. Setzen gewinnt gegen Loeschen.
+MON_PULSES: process(clk_50)
+begin
+	if rising_edge(clk_50) then
+		if mon_rd = '1' and mon_idx = 10 then
+			mon_sol_x(7 downto 0) <= mon_sol(7 downto 0);
+		else
+			mon_sol_x(7 downto 0) <= mon_sol_x(7 downto 0) or mon_sol(7 downto 0);
+		end if;
+		if mon_rd = '1' and mon_idx = 11 then
+			mon_sol_x(8) <= mon_sol(8);
+		else
+			mon_sol_x(8) <= mon_sol_x(8) or mon_sol(8);
+		end if;
+		if mon_rd = '1' and mon_idx = 12 then
+			mon_snd_x <= mon_snd;
+		else
+			mon_snd_x <= mon_snd_x or mon_snd;
+		end if;
+	end if;
+end process;
+
+-- Displays (nur 80/80A, BCD): Ziffer aus den 74175-Latches Din_Seg_A/B/C bei
+-- Digit-Strobe s = U5 PA3..0. Zuordnung wie boot_message.vhd:
+--   A: s 15, 5..0 = Spieler 1 links..rechts,  s 12..6 = Spieler 2 links..rechts
+--   B: dieselben Strobes fuer Spieler 3 bzw. 4
+--   C: s 15..12 = Status links..rechts (Reihenfolge an der Anlage ungeprueft)
+-- Unter FA-Control bleiben die zuletzt gelesenen Ziffern stehen.
+MON_DISP: process(clk_50)
+	variable s : integer range 0 to 15;
+begin
+	if rising_edge(clk_50) then
+		mon_s_q  <= U5_pa_out(3 downto 0);
+		mon_s_qq <= mon_s_q;
+		if mon_s_q = mon_s_qq and game_running = '1' and fa_active = '0' and not80B = '1' then
+			s := to_integer(unsigned(mon_s_q));
+			case s is
+				when 0 to 5 =>
+					mon_dig(4 + 6 - s)  <= Din_Seg_A;		-- Spieler 1, Stelle 1..6
+					mon_dig(18 + 6 - s) <= Din_Seg_B;		-- Spieler 3
+				when 15 =>
+					mon_dig(4)  <= Din_Seg_A;				-- Spieler 1, Stelle 0
+					mon_dig(18) <= Din_Seg_B;				-- Spieler 3
+				when others => null;
+			end case;
+			case s is
+				when 6 to 12 =>
+					mon_dig(11 + 12 - s) <= Din_Seg_A;	-- Spieler 2
+					mon_dig(25 + 12 - s) <= Din_Seg_B;	-- Spieler 4
+				when others => null;
+			end case;
+			case s is
+				when 12 to 15 =>
+					mon_dig(15 - s) <= Din_Seg_C;			-- Status
+				when others => null;
+			end case;
+		end if;
+	end if;
+end process;
+
+mon_data(7 downto 0)     <= x"00";		-- Byte 0 ist die Laenge, sendet fa_control
+mon_data(15 downto 8)    <= "000000" & fa_active & game_running;
+mon_data(63 downto 16)   <= mon_lamps;
+mon_data(79 downto 64)   <= "0000000" & mon_sol;
+mon_data(95 downto 80)   <= "0000000" & mon_sol_x;
+mon_data(103 downto 96)  <= "000" & mon_snd_x;
+mon_data(183 downto 104) <= "00" & fa_sw_state;
+
+mon_disp_pack: for n in 0 to 35 generate
+	pad: if MON_SEQ(n) < 0 generate
+		mon_data(8 * (23 + n / 2) + 7 - 4 * (n mod 2) downto 8 * (23 + n / 2) + 4 - 4 * (n mod 2)) <= "1111";
+	end generate;
+	dig: if MON_SEQ(n) >= 0 generate
+		mon_data(8 * (23 + n / 2) + 7 - 4 * (n mod 2) downto 8 * (23 + n / 2) + 4 - 4 * (n mod 2)) <= mon_dig(MON_SEQ(n));
+	end generate;
+end generate;
 
 end generate;
 
