@@ -11,5 +11,5 @@
     Dormant     = $false
     # Debug[1..2] wie auf HW2.1x nicht herausgefuehrt; FA_* liegen auf echten Pins.
     VirtualPins = @('Debug[1]', 'Debug[2]')
-    Notes       = 'Neu 04.11.2026: FA-Control (HAS_ESP32) statt integriertem Soundboard (HAS_SOUNDBOARD = false). Pinout aus plus_hw21x_cyclone_iv ueber pins_Cyclone_II_IV_10.xlsx umgesetzt, NICHT hardwaregetestet.'
+    Notes       = 'Neu 04.11.2026: FA-Control (HAS_ESP32) statt integriertem Soundboard (HAS_SOUNDBOARD = false). Pinout aus plus_hw21x_cyclone_iv ueber pins_Cyclone_II_IV_10.xlsx umgesetzt. Hardwaregetestet 06.11.2026 (Ralf): Connect/Release, Monitor-Displays, Namensdateien GottFA80. Erstes Release v711 (.rbf).'
 }
