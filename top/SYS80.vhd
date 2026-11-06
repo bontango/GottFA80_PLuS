@@ -98,6 +98,7 @@ architecture rtl of SYS80 is
 
 signal cpu_clk		: std_logic; -- 895 kHz CPU clock
 signal reset_l	 	: std_logic := '0';
+signal game_reset_l	: std_logic;	-- reset_l, plus gehalten solange FA-Control die Kontrolle hat
 signal reset_sw_stable	:	std_logic; 
 signal Counter : integer range 0 to 15 := 0;
 
@@ -397,7 +398,15 @@ port map(
 	);
 		
 -- RIOT IRQ outputs all assert CPU IRQ input
-cpu_irq_n <= U4_irq_n and U5_irq_n and U6_irq_n;		
+cpu_irq_n <= U4_irq_n and U5_irq_n and U6_irq_n;
+
+-- Reset des Spielkerns (6502, RIOTs U4/U5/U6, game_running). Wie auf der Original-
+-- MPU haengen CPU und RIOTs am selben Reset: unter FA-Control wird der ganze Kern
+-- angehalten, nach der Freigabe startet er wie beim Einschalten (Ausgaenge bleiben
+-- sicher, bis game_running wieder steht). Vorher lief nur die CPU neu an und fand
+-- RIOTs im alten Zustand vor - das Spiel lief danach nicht sauber (kein Attract).
+-- Ohne ESP ist fa_active '0', game_reset_l also gleich reset_l.
+game_reset_l <= reset_l and not fa_active;
 --cpu_irq_n <= '1';
 
 -- general assigments
@@ -425,7 +434,7 @@ port map(
 	count =>"11111111",
 	d_in => cpu_irq_n,
 	d_out => game_running,
-	clear => reset_l
+	clear => game_reset_l
 	);
  
 ---------------------
@@ -762,7 +771,7 @@ port map(
 U1: entity work.T65 -- 6502 
 port map(
 	Mode    			=> "00",
-	Res_n   			=> reset_l and not fa_active,	-- FA-Control haelt die CPU an
+	Res_n   			=> game_reset_l,	-- FA-Control haelt den Spielkern an
 	Enable  			=> '1',
 	Clk     			=> cpu_clk,
 	Rdy     			=> '1',
@@ -836,7 +845,7 @@ port map(
 U4_IO: entity work.R6532  -- Switchmatrx
 port map(
 	phi2   => phi2,
-   rst_n  => reset_l,
+   rst_n  => game_reset_l,
    cs     => U4_IO_cs,
    rw_n   => cpu_wr_n,
 	irq_n  => U4_irq_n,
@@ -864,7 +873,7 @@ port map(
 U5_IO: entity work.R6532  -- Display Control
 port map(
 	phi2   => phi2,
-   rst_n  => reset_l,
+   rst_n  => game_reset_l,
    cs     => U5_IO_cs,
    rw_n   => cpu_wr_n,
 	irq_n  => U5_irq_n,
@@ -890,7 +899,7 @@ port map(
 U6_IO: entity work.R6532  -- Solenoid & Lamp Control
 port map(
 	phi2   => phi2,
-   rst_n  => reset_l,
+   rst_n  => game_reset_l,
    cs     => U6_IO_cs,
    rw_n   => cpu_wr_n,
 	irq_n  => U6_irq_n,
@@ -1075,8 +1084,17 @@ gen_fa_control: if HAS_ESP32 generate
 	signal mon_lamps  : std_logic_vector(47 downto 0) := (others => '0');
 	signal mon_b_q    : std_logic_vector(7 downto 0) := (others => '0');
 	signal mon_b_qq   : std_logic_vector(7 downto 0) := (others => '0');
-	signal mon_s_q    : std_logic_vector(3 downto 0) := (others => '0');
-	signal mon_s_qq   : std_logic_vector(3 downto 0) := (others => '0');
+	signal mon_pa_q   : std_logic_vector(6 downto 0) := (others => '0');	-- U5 PA, doppelt abgetastet
+	signal mon_pa_qq  : std_logic_vector(6 downto 0) := (others => '0');
+	signal mon_pa_l   : std_logic_vector(6 downto 0) := (others => '0');	-- letzter stabiler Wert
+	signal mon_pb_q   : std_logic_vector(6 downto 0) := (others => '0');	-- U5 PB
+	signal mon_pb_qq  : std_logic_vector(6 downto 0) := (others => '0');
+	signal mon_strb   : std_logic_vector(3 downto 0) := (others => '0');	-- Strobe, fuer den gesammelt wird
+	signal mon_va     : std_logic_vector(3 downto 0) := (others => '1');	-- gesammelt: Latch A
+	signal mon_vb     : std_logic_vector(3 downto 0) := (others => '1');	-- Latch B
+	signal mon_vc     : std_logic_vector(3 downto 0) := (others => '1');	-- Latch C
+	signal mon_got    : std_logic_vector(2 downto 0) := (others => '0');	-- A/B/C mit echtem Wert
+	signal mon_blk    : std_logic := '0';										-- Austasten gesehen
 	signal mon_eff_a  : std_logic_vector(7 downto 0);
 	signal mon_sol    : std_logic_vector(8 downto 0);
 	signal mon_sol_x  : std_logic_vector(8 downto 0) := (others => '0');
@@ -1374,40 +1392,84 @@ begin
 	end if;
 end process;
 
--- Displays (nur 80/80A, BCD): Ziffer aus den 74175-Latches Din_Seg_A/B/C bei
--- Digit-Strobe s = U5 PA3..0. Zuordnung wie boot_message.vhd:
+-- Displays (nur 80/80A, BCD), ausgewertet wie lisy80_display_handler_bcd (LISY80):
+-- Ein Port-A-Schreibzugriff setzt den Digit-Strobe s = U5 PA3..0 und laedt mit der
+-- steigenden Flanke von PA4/5/6 die 74175-Latches A/B/C mit U5 PB3..0 (= Din_Seg).
+-- Das Spiel tastet je Digit aus, indem es alle drei Latches GLEICHZEITIG mit 15
+-- laedt - diesen Schritt nicht als Ziffer nehmen. Frueher wurde Din_Seg bei jedem
+-- Takt kopiert; der Monitor zeigte dann meist "dunkel" und nur zufaellig eine Ziffer.
+-- Gesammelt wird je Strobe, geschrieben beim Wechsel auf den naechsten Strobe:
+-- echter Wert vor "nur ausgetastet" (= 15) vor "nichts gesehen" (alter Wert bleibt).
+-- PB4/5/6 = 0 ist die direkt geschaltete Mittel-/Eins-Leitung ("h-line"), wie LISY
+-- als Ziffer 1. Zuordnung wie boot_message.vhd:
 --   A: s 15, 5..0 = Spieler 1 links..rechts,  s 12..6 = Spieler 2 links..rechts
 --   B: dieselben Strobes fuer Spieler 3 bzw. 4
 --   C: s 15..12 = Status links..rechts (Reihenfolge an der Anlage ungeprueft)
 -- Unter FA-Control bleiben die zuletzt gelesenen Ziffern stehen.
 MON_DISP: process(clk_50)
-	variable s : integer range 0 to 15;
+	variable s    : integer range 0 to 15;
+	variable rise : std_logic_vector(2 downto 0);
+	variable g    : std_logic_vector(2 downto 0);
+	variable b    : std_logic;
+	variable va, vb, vc : std_logic_vector(3 downto 0);
+	variable da, db, dc : std_logic_vector(3 downto 0);
 begin
 	if rising_edge(clk_50) then
-		mon_s_q  <= U5_pa_out(3 downto 0);
-		mon_s_qq <= mon_s_q;
-		if mon_s_q = mon_s_qq and game_running = '1' and fa_active = '0' and not80B = '1' then
-			s := to_integer(unsigned(mon_s_q));
-			case s is
-				when 0 to 5 =>
-					mon_dig(4 + 6 - s)  <= Din_Seg_A;		-- Spieler 1, Stelle 1..6
-					mon_dig(18 + 6 - s) <= Din_Seg_B;		-- Spieler 3
-				when 15 =>
-					mon_dig(4)  <= Din_Seg_A;				-- Spieler 1, Stelle 0
-					mon_dig(18) <= Din_Seg_B;				-- Spieler 3
-				when others => null;
-			end case;
-			case s is
-				when 6 to 12 =>
-					mon_dig(11 + 12 - s) <= Din_Seg_A;	-- Spieler 2
-					mon_dig(25 + 12 - s) <= Din_Seg_B;	-- Spieler 4
-				when others => null;
-			end case;
-			case s is
-				when 12 to 15 =>
-					mon_dig(15 - s) <= Din_Seg_C;			-- Status
-				when others => null;
-			end case;
+		mon_pa_q  <= U5_pa_out(6 downto 0);
+		mon_pa_qq <= mon_pa_q;
+		mon_pb_q  <= U5_pb_out(6 downto 0);
+		mon_pb_qq <= mon_pb_q;
+		if mon_pa_q = mon_pa_qq and mon_pb_q = mon_pb_qq and mon_pa_q /= mon_pa_l
+		   and game_running = '1' and fa_active = '0' and not80B = '1' then
+			mon_pa_l <= mon_pa_q;
+			g := mon_got; b := mon_blk; va := mon_va; vb := mon_vb; vc := mon_vc;
+
+			-- Strobe gewechselt: Gesammeltes dem vorigen Strobe zuschreiben
+			if mon_pa_q(3 downto 0) /= mon_strb then
+				if g(0) = '1' then da := va; else da := "1111"; end if;
+				if g(1) = '1' then db := vb; else db := "1111"; end if;
+				if g(2) = '1' then dc := vc; else dc := "1111"; end if;
+				s := to_integer(unsigned(mon_strb));
+				if g(0) = '1' or b = '1' then
+					case s is
+						when 0 to 5  => mon_dig(4 + 6 - s)   <= da;	-- Spieler 1, Stelle 1..6
+						when 15      => mon_dig(4)           <= da;	-- Spieler 1, Stelle 0
+						when 6 to 12 => mon_dig(11 + 12 - s) <= da;	-- Spieler 2
+						when others  => null;
+					end case;
+				end if;
+				if g(1) = '1' or b = '1' then
+					case s is
+						when 0 to 5  => mon_dig(18 + 6 - s)  <= db;	-- Spieler 3
+						when 15      => mon_dig(18)          <= db;
+						when 6 to 12 => mon_dig(25 + 12 - s) <= db;	-- Spieler 4
+						when others  => null;
+					end case;
+				end if;
+				if g(2) = '1' or b = '1' then
+					case s is
+						when 12 to 15 => mon_dig(15 - s) <= dc;		-- Status
+						when others   => null;
+					end case;
+				end if;
+				g := "000"; b := '0';
+				mon_strb <= mon_pa_q(3 downto 0);
+			end if;
+
+			-- Latch-Flanken dieses Schreibzugriffs
+			rise := mon_pa_q(6 downto 4) and not mon_pa_l(6 downto 4);
+			if rise = "111" and mon_pb_q(3 downto 0) = "1111" then
+				b := '1';									-- Austasten
+			else
+				if rise(0) = '1' then va := mon_pb_q(3 downto 0); g(0) := '1'; end if;
+				if rise(1) = '1' then vb := mon_pb_q(3 downto 0); g(1) := '1'; end if;
+				if rise(2) = '1' then vc := mon_pb_q(3 downto 0); g(2) := '1'; end if;
+			end if;
+			if mon_pb_q(4) = '0' then va := "0001"; g(0) := '1'; end if;
+			if mon_pb_q(5) = '0' then vb := "0001"; g(1) := '1'; end if;
+			if mon_pb_q(6) = '0' then vc := "0001"; g(2) := '1'; end if;
+
+			mon_got <= g; mon_blk <= b; mon_va <= va; mon_vb <= vb; mon_vc <= vc;
 		end if;
 	end if;
 end process;
